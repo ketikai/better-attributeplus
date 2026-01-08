@@ -23,6 +23,7 @@ import org.bukkit.entity.Player;
 import org.serverct.ersha.api.AttributeAPI;
 import org.serverct.ersha.attribute.data.AttributeData;
 import org.serverct.ersha.attribute.persistent.AttributePersistentData;
+import org.serverct.ersha.attribute.persistent.AttributePersistentSource;
 import pers.ketikai.minecraft.spigot.betterattributeplus.util.CommandUtils;
 import team.idealstate.sugar.logging.Log;
 import team.idealstate.sugar.next.command.Command;
@@ -33,13 +34,24 @@ import team.idealstate.sugar.next.command.annotation.CommandArgument.ConverterRe
 import team.idealstate.sugar.next.command.annotation.CommandHandler;
 import team.idealstate.sugar.next.command.exception.CommandArgumentConversionException;
 import team.idealstate.sugar.next.context.annotation.component.Controller;
+import team.idealstate.sugar.next.context.lifecycle.Initializable;
 import team.idealstate.sugar.validate.annotation.NotNull;
 
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.Collection;
 import java.util.List;
+import java.util.function.Consumer;
 
 @Controller(name = "better-attributeplus")
-public class BetterAttributePlusController implements Command {
+public class BetterAttributePlusController implements Command, Initializable {
+
+    private final FunctionHandler functionHandler = new FunctionHandler();
+    private volatile MethodHandle modifySource = null;
+    private volatile Object functionObject = null;
 
     @CommandHandler(value = "persistent {player} {source} {attributes} {date}")
     @NotNull
@@ -66,21 +78,48 @@ public class BetterAttributePlusController implements Command {
         try {
             AttributeData attrData = AttributeAPI.getAttrData(player);
             AttributePersistentData persistent = attrData.getPersistent();
-            if (persistent != null) {
-                persistent.modifySource(source, save, ps -> {
-                    ps.setDate(date);
-                    for (String attribute : attributes.split(",")) {
-                        ps.addAttribute(attribute);
-                    }
-                    return null;
-                });
-            }
+            modifySource(persistent, source, save, ps -> {
+                ps.setDate(date);
+                for (String attribute : attributes.split(",")) {
+                    ps.addAttribute(attribute);
+                }
+            });
         } catch (Throwable e) {
             Log.error(e);
             return CommandResult.failure(
                     String.format("未能推送属性源修改操作：(%s, %s, %s, %s, %s)，错误信息请查看日志输出。", player.getName(), source, attributes, date, save));
         }
         return CommandResult.success("已推送属性源修改操作");
+    }
+
+    public void modifySource(AttributePersistentData persistentData, String source, boolean save, Consumer<AttributePersistentSource> consumer) throws Throwable {
+        if (persistentData == null) {
+            return;
+        }
+        functionHandler.setLocal(consumer);
+        modifySource.bindTo(persistentData).invokeWithArguments(source, save, functionObject);
+    }
+
+    @Override
+    public void initialize() {
+        Method[] methods = AttributePersistentData.class.getMethods();
+        for (Method method : methods) {
+            if ("modifySource".equals(method.getName())) {
+                Class<?>[] parameterTypes = method.getParameterTypes();
+                if (parameterTypes.length == 3) {
+                    try {
+                        this.modifySource = MethodHandles.publicLookup().unreflect(method);
+                    } catch (IllegalAccessException e) {
+                        throw new RuntimeException(e);
+                    }
+                    this.functionObject = Proxy.newProxyInstance(getClass().getClassLoader(), new Class[]{parameterTypes[2]}, functionHandler);
+                    break;
+                }
+            }
+        }
+        if (functionObject == null) {
+            throw new RuntimeException("未找到 modifySource 方法，不兼容的 AP 版本！");
+        }
     }
 
     @NotNull
@@ -125,5 +164,32 @@ public class BetterAttributePlusController implements Command {
     @NotNull
     public List<String> completeBoolean(@NotNull CommandContext context, @NotNull String argument) {
         return CommandUtils.completeBoolean(context, argument);
+    }
+
+    private static final class FunctionHandler implements InvocationHandler {
+
+        private final ThreadLocal<Consumer<AttributePersistentSource>> local = ThreadLocal.withInitial(() -> null);
+
+        public void setLocal(Consumer<AttributePersistentSource> consumer) {
+            local.set(consumer);
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+            if (method.getName().equals("invoke")) {
+                Consumer<AttributePersistentSource> consumer = local.get();
+                if (consumer != null) {
+                    try {
+                        AttributePersistentSource source = (AttributePersistentSource) args[0];
+                        consumer.accept(source);
+                    } catch (Throwable e) {
+                        Log.error(e);
+                    }
+                }
+                local.remove();
+                return null;
+            }
+            throw new UnsupportedOperationException();
+        }
     }
 }
