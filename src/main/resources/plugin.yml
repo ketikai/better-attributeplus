@@ -1,0 +1,14 @@
+# noinspection YAMLSchemaValidation
+name: better-attributeplus
+version: '${version}'
+main: pers.ketikai.minecraft.spigot.betterattributeplus.BetterAttributePlus
+load: STARTUP
+authors:
+- ketikai
+depend:
+- minecraft-next
+- AttributePlus
+commands:
+  better-attributeplus:
+    aliases:
+    - b-attr
